@@ -1,84 +1,76 @@
 from __future__ import annotations
 
-from typing import Any
 import logging
 import pathlib
 
 from google.cloud import bigquery
-from pydantic.dataclasses import dataclass
+import pydantic
 import sqlalchemy as sa
 
+from cs_tools.sync.base import DatabaseSyncer
 from . import sanitize
 
 log = logging.getLogger(__name__)
 
 
-@dataclass
-class BigQuery:
+class BigQuery(DatabaseSyncer):
     """
     Interact with a BigQuery database.
-
-    - Select or create a Cloud Platform project.
-    - [Optional] Enable billing for your project.
-    - Enable the BigQuery Storage API.
-    - Setup Authentication.
     """
+
+    __manifest_path__ = pathlib.Path(__file__).parent / "MANIFEST.json"
+    __syncer_name__ = "bigquery"
 
     project_name: str
     dataset: str
-    credentials_file: pathlib.Path
-    truncate_on_load: bool = True
-
-    # DATABASE ATTRIBUTES
-    __is_database__ = True
+    credentials_file: pydantic.FilePath
 
     @property
     def bq(self) -> bigquery.Client:
-        """
-        Get the underlying BigQuery client.
-        """
+        """Get the underlying BigQuery client."""
         return self.cnxn.connection._client
 
-    def __post_init_post_parse__(self):
-        self.engine = sa.create_engine(
-            f"bigquery://{self.project_name}/{self.dataset}", credentials_path=self.credentials_file
-        )
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        url = f"bigquery://{self.project_name}/{self.dataset}"
+        self._engine = sa.create_engine(url, credentials_path=self.credentials_file)
+        print(self.engine)
 
-        self.cnxn = self.engine.connect()
+    def __repr__(self) -> str:
+        return f"<BigQuerySyncer >"
 
-        # decorators must be declared here, SQLAlchemy doesn't care about instances
-        sa.event.listen(sa.schema.MetaData, "after_create", self.capture_metadata)
+    def load(self, tablename: str) -> TableRows:
+        """SELECT rows from BigQuery."""
+        table = self.metadata.tables[tablename]
+        query = table.select().compile(self.engine)
+        job   = self.bq.query(query)
 
-    def capture_metadata(self, metadata, cnxn, **kw):
-        self.metadata = metadata
+        table_rows: TableRows = []
 
-    def __repr__(self):
-        return f"<Database ({self.name}) sync: conn_string='{self.engine.url}'>"
+        for row in query_job.result():
+            data = table.validated_init(row).model_dump()
+            table_rows.append(data)
 
-    # MANDATORY PROTOCOL MEMBERS
+        return table_rows
 
-    @property
-    def name(self) -> str:
-        return "bigquery"
-
-    def load(self, table: str) -> list[dict[str, Any]]:
-        t = self.metadata.tables[table]
-
-        with self.cnxn.begin():
-            r = self.cnxn.execute(t.select())
-
-        return [dict(_) for _ in r]
-
-    def dump(self, table: str, *, data: list[dict[str, Any]]) -> None:
+    def dump(self, tablename: str, *, data: TableRows) -> None:
+        """INSERT rows into BigQuery."""
         if not data:
             log.warning(f"no data to write to syncer {self}")
             return
 
-        t = self.metadata.tables[table]
+        table = self.metadata.tables[f"{self.schema_}.{tablename}"]
 
-        if self.truncate_on_load:
-            with self.cnxn.begin():
-                self.cnxn.execute(t.delete().where(True))
+        if self.load_strategy == "APPEND":
+            raise NotImplementedError("coming soon..")
+
+        if self.load_strategy == "TRUNCATE":
+            self.session.execute(table.delete())
+            raise NotImplementedError("coming soon..")
+
+        if self.load_strategy == "UPSERT":
+            # self.merge_into()
+            raise NotImplementedError("coming soon..")
 
         # DEV NOTE: nicholas.cooper@thoughtspot.com
         #
@@ -93,8 +85,9 @@ class BigQuery:
         # transactions and rollback logic is not REALLY possible without more
         # orchestration.
         #
-        t = self.bq.get_table(f"{self.project_name}.{self.dataset}.{table}")
-        d = sanitize.clean_for_bq(data)
+        # https://github.com/googleapis/python-bigquery/blob/132c14bbddfb61ea8bc408bef5e958e21b5b819c/samples/table_insert_rows.py
+        # t = self.bq.get_table(f"{self.project_name}.{self.dataset}.{table}")
+        # d = sanitize.clean_for_bq(data)
 
-        cfg = bigquery.LoadJobConfig(schema=t.schema)
-        self.bq.load_table_from_json(d, t, job_config=cfg)
+        # cfg = bigquery.LoadJobConfig(schema=t.schema)
+        # self.bq.load_table_from_json(d, t, job_config=cfg)
