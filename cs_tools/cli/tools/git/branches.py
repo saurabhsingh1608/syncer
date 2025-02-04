@@ -202,10 +202,10 @@ def branches_deploy(
     # An OK response doesn't mean the content was successful.
     results = r.json()
 
-    table = Table(title="Deploy Results", width=135)
-    table.add_column("File Name", width=25)
+    table = Table(title="Deploy Results", width=210)
+    table.add_column("File Name", width=40)
     table.add_column("Status", width=10)
-    table.add_column("Message", width=100)
+    table.add_column("Message", width=160)
 
     guids = []
     for _ in results:
